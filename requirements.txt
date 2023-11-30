@@ -1,0 +1,5 @@
+boto3
+requests
+google-auth
+google-cloud-storage
+urllib3<2.0
