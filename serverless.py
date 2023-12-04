@@ -8,6 +8,12 @@ import shutil
 from google.cloud import storage
 from google.oauth2 import service_account
 from botocore.exceptions import ClientError
+import datetime
+import uuid
+import time
+
+# Global variable for unique ID
+current_invocation_id = None
 
 # Initialize AWS clients
 client_sns = boto3.client('sns')
@@ -39,61 +45,47 @@ mailgun_api_key = getsecret(os.environ['MAILGUN_API_KEY_SECRET_ARN'])
 mailgun_domain = getsecret(os.environ['MAILGUN_DOMAIN_SECRET_ARN'])
 
 # Parse JSON string to dictionary for GCP service account credentials
-GCP_SERVICE_ACCOUNT_CREDENTIALS = json.loads(
-    GCP_SERVICE_ACCOUNT_CREDENTIALS_JSON)
+GCP_SERVICE_ACCOUNT_CREDENTIALS = json.loads(GCP_SERVICE_ACCOUNT_CREDENTIALS_JSON)
 
-import requests
-
-# def send_email_with_mailgun(mailgun_api_key, mailgun_domain, to, subject, text):
-#     url = f"https://api.mailgun.net/v3/{mailgun_domain}/messages"
-#     auth = ("api", mailgun_api_key)
-#     data = {
-#         "from": f"Excited User <mailgun@{mailgun_domain}>",
-#         "to": to,
-#         "subject": subject,
-#         "text": text
-#     }
-    
-#     response = requests.post(url, auth=auth, data=data)
-#     return response
-
+def log_dynamodb(request_id, user_email, status, info):
+    try:
+        table = dynamodb.Table(os.environ['DYNAMODB_TABLE_SECRET_ARN'])
+        table.put_item(
+            Item={
+                'RequestId': request_id,
+                'UserEmail': user_email,
+                'Status': status,
+                'Info': info
+            }
+        )
+    except ClientError as e:
+        print(f"Error logging to DynamoDB: {e}")
+        raise e
 
 def send_email_with_mailgun(email_address, subject, body):
-    api_key = mailgun_api_key
-    domain = mailgun_domain
+    api_key = getsecret(os.environ['MAILGUN_API_KEY_SECRET_ARN'])
+    domain = getsecret(os.environ['MAILGUN_DOMAIN_SECRET_ARN'])
     sender_email = "no-reply@demo.webappcloud.me"
 
     url = f'https://api.mailgun.net/v3/{domain}/messages'
-    data = {
-        'from': sender_email,
-        'to': email_address,
-        'subject': subject,
-        'text': body
-    }
+    data = {'from': sender_email, 'to': email_address, 'subject': subject, 'text': body}
 
-    response = requests.post(url, auth=('api', api_key), data=data)
-    
-    if response.status_code == 200:
-        print("Email sent successfully")
-        return True, response.json()  # Email sent successfully, return response
-    else:
-        print(f"Error sending email: {response.text}")
-        return False, response.json() if response.status_code != 404 else None 
-
-# Define a helper function to log events to DynamoDB
-def log_dynamodb(request_id, user_email, status, info):
-    table = dynamodb.Table(DYNAMODB_TABLE)
-    table.put_item(
-        Item={
-            'RequestId': request_id,
-            'UserEmail': user_email,
-            'Status': status,
-            'Info': info
-        }
-    )
+    try:
+        response = requests.post(url, auth=('api', api_key), data=data)
+        if response.status_code == 200:
+            print("Email sent successfully")
+            return True, response.json()
+        else:
+            print(f"Error sending email: {response.text}")
+            return False, response.json() if response.status_code != 404 else None
+    except requests.RequestException as e:
+        print(f"Request error sending email: {e}")
+        raise e        
 
 # Define the Lambda function handler
 def handler_lambda(event, context):
+    global current_invocation_id
+    current_invocation_id = f"{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4()}"
     # Initialize default values for email subject and body
     email_subject = "Submission Notification"
     email_body = "Your submission has been processed."
@@ -109,13 +101,8 @@ def handler_lambda(event, context):
 
         # Step 2: Handle error message
         if error_message:
-            # Log the error to DynamoDB
-            log_dynamodb(context.aws_request_id, message['userEmail'], "Failed", error_message)
-            send_email_with_mailgun(
-            user_email,
-            "Assignment Submission Failure",
-            email_body = f"Your assignment has been failed. {error_message}"
-        )
+            log_dynamodb(current_invocation_id, user_email, "Failed", error_message)
+            send_email_with_mailgun(user_email, "Assignment Submission Failure", f"Your assignment has failed: {error_message}")
             return {'statusCode': 200, 'body': json.dumps(f'{error_message} notification sent.')}
         
         error_subject = "Submission Error"
@@ -129,7 +116,7 @@ def handler_lambda(event, context):
             send_email_with_mailgun(
             user_email,
             "Assignment Submission Failure",
-            email_body = f"Your assignment has been failed. {error_info}"
+            "Your assignment has been failed. {error_info}"
         )
             
 
@@ -140,7 +127,7 @@ def handler_lambda(event, context):
             send_email_with_mailgun(
             user_email,
             "Assignment Submission Failure",
-            email_body = f"Your assignment has been failed. {error_info}"
+            "Your assignment has been failed. {error_info}"
         )
             return {'statusCode': 400, 'body': json.dumps('Bad Request: URL must be a .zip file.')}
 
@@ -156,7 +143,7 @@ def handler_lambda(event, context):
             send_email_with_mailgun(
             user_email,
             "Assignment Submission Failure",
-            email_body = f"Your assignment has been failed. {error_info}"
+            "Your assignment has been failed. {error_info}"
         )
             return {'statusCode': response.status_code, 'body': json.dumps('Bad Request: Could not download the file.')}
 
@@ -173,7 +160,7 @@ def handler_lambda(event, context):
             send_email_with_mailgun(
             user_email,
             "Assignment Submission Failure",
-            email_body = f"Your assignment has been failed. {error_info}"
+            "Your assignment has been failed. {error_info}"
             )   
             return {'statusCode': 400, 'body': json.dumps('Bad Request: The file is empty.')}
 
@@ -187,7 +174,7 @@ def handler_lambda(event, context):
             send_email_with_mailgun(
             user_email,
             "Assignment Submission Failure",
-            email_body = f"Your assignment has been failed. {error_info}"
+            "Your assignment has been failed. {error_info}"
             )
             return {'statusCode': 400, 'body': json.dumps('Bad Request: URL must point to a .zip file.')}
 
@@ -214,7 +201,7 @@ def handler_lambda(event, context):
         send_email_with_mailgun(
             user_email,
             "Assignment Submission Successful",
-            email_body = f"Your assignment has been successfully uploaded. {submission_link}"
+            "Your assignment has been successfully uploaded. {submission_link}"
         )
         
         # Step 7: Log successful submission to DynamoDB with submission link
@@ -234,6 +221,7 @@ def handler_lambda(event, context):
         raise e  # Re-raise the exception to make the Lambda function fail
     except Exception as e:
         print("An error occurred:", e)
+        #log_dynamodb(current_invocation_id, "Error", f"An error occurred: {e}")
         return {'statusCode': 500, 'body': json.dumps('Internal Server Error')}
 
     return {
